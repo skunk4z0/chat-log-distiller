@@ -1,0 +1,7 @@
+{
+  "entities": ["Rust", "Tokio"],
+  "context": "Use cargo.",
+  "decisions": ["Use cargo.", "Add tokio dep."],
+  "rejected_ideas": [],
+  "code_snippets": []
+}

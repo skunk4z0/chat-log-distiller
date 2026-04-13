@@ -1,0 +1,7 @@
+{
+  "entities": ["Rust"],
+  "context": null,
+  "decisions": ["Use cargo."],
+  "rejected_ideas": [],
+  "code_snippets": []
+}
