@@ -38,10 +38,23 @@ def _dedupe_adjacent_decisions(items: list[str]) -> list[str]:
     return out
 
 
+def _pick_first_non_null(values: list[str | None]) -> str | None:
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def merge_chunk_extractions(chunks: list[ChunkExtraction]) -> MergedExtraction:
     entities: list[str] = []
     contexts: list[str | None] = []
     decisions: list[str] = []
+    projects: list[str | None] = []
+    tool_context: list[str] = []
+    automation_types: list[str | None] = []
+    learning_levels: list[str | None] = []
+    source_origins: list[str | None] = []
+    entry_types: list[str | None] = []
     rejected: list[RejectedIdea] = []
     codes: list[CodeSnippet] = []
 
@@ -49,6 +62,12 @@ def merge_chunk_extractions(chunks: list[ChunkExtraction]) -> MergedExtraction:
         entities.extend(ch.entities)
         contexts.append(ch.context)
         decisions.extend(ch.decisions)
+        projects.append(ch.project)
+        tool_context.extend(ch.tool_context)
+        automation_types.append(ch.automation_type)
+        learning_levels.append(ch.learning_level)
+        source_origins.append(ch.source_origin)
+        entry_types.append(ch.entry_type)
         rejected.extend(ch.rejected_ideas)
         codes.extend(ch.code_snippets)
 
@@ -57,6 +76,12 @@ def merge_chunk_extractions(chunks: list[ChunkExtraction]) -> MergedExtraction:
         entities=_dedupe_preserve_order(entities),
         contexts=contexts,
         decisions=_dedupe_adjacent_decisions(decisions),
+        project=_pick_first_non_null(projects),
+        tool_context=_dedupe_preserve_order(tool_context),
+        automation_type=_pick_first_non_null(automation_types),
+        learning_level=_pick_first_non_null(learning_levels),
+        source_origin=_pick_first_non_null(source_origins),
+        entry_type=_pick_first_non_null(entry_types),
         rejected_ideas=rejected,
         code_snippets=codes,
     )

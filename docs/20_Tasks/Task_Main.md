@@ -17,7 +17,12 @@
 
 ## Phase 2（次・実装バックログ）
 
-- [ ] **処理状態の永続化**: 未処理 / 成功 / **失敗** を JSON または SQLite で記録し、クラッシュ後に再開可能にする
-- [ ] **`failed/`（または `quarantine/`）**: API・パースで落ちた元ファイルを移し、手動再試行できるようにする
+- [x] **抽出スキーマ拡張（Signal対応）**: `project` / `tool_context` / `automation_type` / `learning_level` / `source_origin` / `entry_type` を `ChunkExtraction`・`MergedExtraction`・`merge.py`・`main.py`（YAML）まで一貫対応
+- [ ] **単一ファイル E2E 完遂（最優先）**: 1ファイルごとに必ず `output+archive`（成功）または `failed/`（失敗）へ着地させ、宙ぶらりんをなくす
+- [ ] **`failed/`（または `quarantine/`）**: API・パースで落ちた元ファイルを移し、処理全体は継続（次ファイルへ進む）
 - [ ] **Vault 語彙との整合**: `main.py` 出力 YAML を `Obsidian_Vault` の採用語彙（`type` / `subtype` / `area` 等）に合わせるオプション（またはテンプレ後処理スクリプト）
 - [ ] **論理整合・二次パス**（方針メモを `10_Specs` に切り出し、必要なら別スクリプト）
+
+## Future Backlog（現時点では見送り）
+
+- [ ] **処理状態の永続化（Resume）**: 未処理 / 成功 / 失敗 を JSON または SQLite で記録し、クラッシュ後再開を可能にする（現行運用ボリュームではオーバースペック）

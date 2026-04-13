@@ -12,13 +12,25 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 copy NUL .env
-# .env に GOOGLE_API_KEY=...
+# .env 例:
+# DISTILL_PROVIDER=gemini
+# GEMINI_MODEL=gemini-2.5-flash-lite
+# GOOGLE_API_KEY=...
+# OPENROUTER_MODEL=google/gemini-2.5-flash-lite
+# OPENROUTER_API_KEY=...
+# GROQ_MODEL=llama-3.3-70b-versatile
+# GROQ_API_KEY=...
+# MISTRAL_MODEL=mistral-large-latest
+# MISTRAL_API_KEY=...
+# DISTILL_FALLBACK_PROVIDERS=openrouter,groq,mistral
 ```
 
 ## 使い方（単一チャンク）
 
 ```powershell
 python scripts/distill.py --chunk-file input\sample.md -o output\sample.extracted.json
+# 別プロバイダ利用例:
+python scripts/distill.py --provider openrouter --chunk-file input\sample.md -o output\sample.openrouter.json
 ```
 
 - `--print-schema` … 送っている JSON Schema を表示して終了。
@@ -26,8 +38,12 @@ python scripts/distill.py --chunk-file input\sample.md -o output\sample.extracte
 - `--prefer-verbatim-fences` … `code_snippets` を **markdown-it-py** のトークン列（`fence` / `code_block`）から抜いたものに**置き換え**（パーサと整合した機械抽出）。
 - `python scripts/merge.py chunk1.json chunk2.json -o merged.json` … 複数の `ChunkExtraction` JSON を **LLM なし**で結合（`scripts/merge.py`）。
 - `python scripts/chunker.py input\sample.md` … 長文を **AST 上のコード不可分領域**（`fence` / `code_block` の `map`）を守りつつチャンク分割（`--max-chars` / `--overlap-chars`）。
-- `GEMINI_MODEL` 環境変数でモデル ID を変更可能（`distill.py` CLI 既定は `gemini-2.0-flash`、**オーケストレーター** `main.py` 既定は `gemini-2.5-flash`。無料枠なら `gemini-3.1-flash` 等も可）。
+- `DISTILL_PROVIDER` / `--provider` でプロバイダを選択（`gemini`, `openrouter`, `groq`, `mistral`）。
+- モデルは `<PROVIDER>_MODEL` で指定（例: `OPENROUTER_MODEL`）。CLI の `--model` は主プロバイダのみ上書き。
+- `DISTILL_FALLBACK_PROVIDERS` または `--fallback-providers` でフォールバック順を指定可能（例: `openrouter,groq,mistral`）。
 - `python scripts/main.py --once` … `input/` の `.md` / `.txt` をスキャンし、チャンク分割 → **リクエスト間 `sleep(5)`** 付きで `distill` → `merge` → `output/YYYY-MM-DD_<元ファイル名>.md` に保存し、元ファイルを `archive/` にタイムスタンプ付きで移動。ログは標準出力と `logs/pipeline.log`。`--dry-run` で API なし（チャンク数のみ）。ループは `python scripts/main.py`（既定 60 秒間隔）または `--interval 120`。
+- 例（制限回避フォールバック）:
+  `python scripts/main.py --once --only failed\xxx.md --provider gemini --fallback-providers openrouter,groq,mistral --max-output-tokens 16384`
 - **1ファイルをすばやく通しテスト:** `python scripts/main.py --once --only input\sample.md --fast --no-archive` … 成功チャンク間は既定 **3 秒**（`--fast-inter-chunk-sleep 5` で変更。`0` は連打で 503 になりやすい）。**503/429 時のリトライ待機は省略しない**。成功後も `input` を動かさない。
 
 ## 検証（オフライン）

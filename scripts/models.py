@@ -46,6 +46,36 @@ class ChunkExtraction(BaseModel):
     decisions: list[str] = Field(
         description="Confirmed specs or adopted approaches; only from explicit statements, not inference.",
     )
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Primary project identifier explicitly stated in the chunk. "
+            "Use null when not explicit."
+        ),
+    )
+    tool_context: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools explicitly mentioned in the chunk context (e.g. Syncthing, Dataview, Python). "
+            "Do not infer missing tools."
+        ),
+    )
+    automation_type: str | None = Field(
+        default=None,
+        description="Automation category explicitly stated in the chunk; null if absent.",
+    )
+    learning_level: str | None = Field(
+        default=None,
+        description="Learning signal level mapped from explicit Japanese cues only; null if absent.",
+    )
+    source_origin: str | None = Field(
+        default=None,
+        description="Information source origin mapped from explicit cues only; null if absent.",
+    )
+    entry_type: str | None = Field(
+        default=None,
+        description="Entry intent category mapped from explicit cues only; null if absent.",
+    )
     rejected_ideas: list[RejectedIdea] = Field(
         description="Failed attempts or rejected ideas with concrete reasons from the log.",
     )
@@ -69,5 +99,29 @@ class MergedExtraction(BaseModel):
         description="Per-chunk context strings in merge order (same length as chunk_count).",
     )
     decisions: list[str] = Field(description="All decisions in chunk order, lightly de-duplicated (adjacent dup removed).")
+    project: str | None = Field(
+        default=None,
+        description="Resolved project label across chunks (first explicit non-null in chunk order).",
+    )
+    tool_context: list[str] = Field(
+        default_factory=list,
+        description="Union of explicit tool_context values across chunks in first-seen order.",
+    )
+    automation_type: str | None = Field(
+        default=None,
+        description="Resolved automation_type across chunks (first explicit non-null in chunk order).",
+    )
+    learning_level: str | None = Field(
+        default=None,
+        description="Resolved learning_level across chunks (first explicit non-null in chunk order).",
+    )
+    source_origin: str | None = Field(
+        default=None,
+        description="Resolved source_origin across chunks (first explicit non-null in chunk order).",
+    )
+    entry_type: str | None = Field(
+        default=None,
+        description="Resolved entry_type across chunks (first explicit non-null in chunk order).",
+    )
     rejected_ideas: list[RejectedIdea] = Field(description="All rejected_ideas in chunk order.")
     code_snippets: list[CodeSnippet] = Field(description="All code_snippets in chunk order.")
