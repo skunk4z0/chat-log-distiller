@@ -2,6 +2,8 @@
 
 生チャットログを **抽出型**（要約禁止）で構造化 JSON にし、のち Obsidian 用 Markdown（YAML）へ載せる前提のツールです。
 
+**リポジトリ:** https://github.com/skunk4z0/chat-log-distiller
+
 ## セットアップ
 
 ```powershell
