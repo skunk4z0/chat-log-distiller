@@ -49,6 +49,19 @@ def _collect_raw_files(raw_dir: Path) -> list[tuple[str, Path]]:
     return files
 
 
+def _extract_date_for_sort(name: str) -> str:
+    m = re.search(r"\d{4}-\d{2}-\d{2}", name)
+    return m.group(0) if m else "0000-00-00"
+
+
+def _collect_input_files(input_dir: Path) -> list[Path]:
+    if not input_dir.exists():
+        return []
+    files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in {".md", ".txt"}]
+    files.sort(key=lambda p: (_extract_date_for_sort(p.name), p.name.lower()), reverse=True)
+    return files
+
+
 def _import_raw_files(raw_dir: Path, input_dir: Path, dry_run: bool, limit: int | None) -> int:
     input_dir.mkdir(parents=True, exist_ok=True)
     candidates = _collect_raw_files(raw_dir)
@@ -125,6 +138,27 @@ def _is_exhausted_output(text: str) -> bool:
     return any(marker in lower for marker in EXHAUSTION_MARKERS)
 
 
+def _run_main_for_targets(
+    repo_root: Path,
+    targets: list[Path],
+    cooldown_file: Path,
+    cooldown_hours: float,
+) -> int:
+    for target in targets:
+        rel = target.relative_to(repo_root)
+        rc, combined_output = _run_step_capture(
+            [sys.executable, "scripts/main.py", "--once", "--only", str(rel)],
+            repo_root,
+        )
+        if rc != 0:
+            return rc
+        if _is_exhausted_output(combined_output):
+            until = _write_cooldown(cooldown_file, cooldown_hours)
+            print(f"Quota exhausted. Cooldown set until {until.isoformat()}. Exiting normally.")
+            return 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Import raw logs to input/, then run main.py and router.py.",
@@ -178,9 +212,15 @@ def main(argv: list[str] | None = None) -> int:
         print("--cooldown-hours must be > 0", file=sys.stderr)
         return 2
 
-    _import_raw_files(args.raw_dir, input_dir, args.dry_run, args.limit)
-    if args.dry_run:
-        return 0
+    input_dir.mkdir(parents=True, exist_ok=True)
+    pending_input = _collect_input_files(input_dir)
+    if pending_input:
+        print(
+            f"Pending input files detected ({len(pending_input)}). "
+            "Prioritizing input/ and skipping raw import."
+        )
+    else:
+        _import_raw_files(args.raw_dir, input_dir, args.dry_run, args.limit)
 
     cooldown_file = _cooldown_path(repo_root, args.cooldown_file)
     now = datetime.now(timezone.utc)
@@ -198,13 +238,22 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             pass
 
-    rc, combined_output = _run_step_capture([sys.executable, "scripts/main.py", "--once"], repo_root)
+    targets = _collect_input_files(input_dir)
+    if args.limit is not None:
+        targets = targets[: args.limit]
+    if targets:
+        print(f"Processing input targets: {len(targets)}")
+        for p in targets:
+            print(f" - {p.name}")
+    else:
+        print("No input targets found.")
+
+    if args.dry_run:
+        return 0
+
+    rc = _run_main_for_targets(repo_root, targets, cooldown_file, args.cooldown_hours)
     if rc != 0:
         return rc
-    if _is_exhausted_output(combined_output):
-        until = _write_cooldown(cooldown_file, args.cooldown_hours)
-        print(f"Quota exhausted. Cooldown set until {until.isoformat()}. Exiting normally.")
-        return 0
 
     if args.no_router:
         print("Skip router step (--no-router).")

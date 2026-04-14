@@ -119,6 +119,20 @@ python scripts/main.py --once --only input\sample.md --fast --no-archive --model
 `--only` 指定時は対象ファイルの処理完了直後に自動終了する。  
 出力 `output/YYYY-MM-DD_*.md` の YAML と各 `##` セクションを確認。本番寄りの待機なら `--fast` を外す。
 
+### 3.1 取り込み〜Vault 移動まで一発（推奨）
+
+`Obsidian_Vault/300_Resources/AI_Logs/01_Raw` から `YYYY-MM-DD_ai_raw` を含むファイルを日付の新しい順に取り込み、`main.py` で蒸留し、`router.py` で Vault の `02_Structured` へ移動する。
+
+```powershell
+cd C:\Dev\chat-log-distiller
+python scripts/import_and_run.py --limit 1
+```
+
+- `input/` に未処理の `.md` / `.txt` がある場合は **Raw 取り込みをスキップ**し、`input/` を優先する（`--limit` はその並びの先頭 N 件に適用）。
+- 事前確認のみ: `python scripts/import_and_run.py --dry-run --limit 1`
+- 蒸留のみ（Vault 移動なし）: `--no-router`
+- 無料枠枯渇をログから検知した場合は `.quota_cooldown.json` に次回再開時刻を書き、正常終了する（既定 24 時間。`--cooldown-hours` で変更）。
+
 ## 4. Vault との接続（運用）
 
 出力ノートの **置き場**・**YAML キー**を Vault の採用語彙（例: `900_System/90_Template/メタデータ値_最終採用語彙.md`）に揃える作業は、リポジトリ外の運用ノートで決めたあと、`main.py` のフロントマター生成を調整する（Phase 2 バックログ: `docs/20_Tasks/Task_Main.md`）。
