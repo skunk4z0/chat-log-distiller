@@ -30,9 +30,14 @@ class TokenTracker:
     def _get_limit(self, provider: str, model: str, key: str, default: int) -> int:
         prov_limits = self.limits.get(provider, {})
         model_limits = prov_limits.get(model, {})
-        # Fallback to provider-level if model specific is not found, else default
         if key in model_limits:
             return model_limits[key]
+        auto_limits = prov_limits.get("auto", {})
+        if isinstance(auto_limits, dict) and key in auto_limits:
+            return auto_limits[key]
+        default_limits = prov_limits.get("default", {})
+        if isinstance(default_limits, dict) and key in default_limits:
+            return default_limits[key]
         if key in prov_limits and isinstance(prov_limits[key], int):
             return prov_limits[key]
         return default
@@ -41,6 +46,24 @@ class TokenTracker:
         input_tokens = len(self.enc.encode(text))
         output_tokens = max_output_tokens if max_output_tokens is not None else 0
         return input_tokens + output_tokens
+
+    def get_sorted_model_configs(self) -> list[dict]:
+        configs = []
+        for p_name, models in self.limits.items():
+            if not isinstance(models, dict):
+                continue
+            for m_name, lits in models.items():
+                if not isinstance(lits, dict):
+                    continue
+                prio = lits.get("priority", 999)
+                configs.append(
+                    {
+                        "provider": p_name,
+                        "model": m_name,
+                        "priority": prio,
+                    }
+                )
+        return sorted(configs, key=lambda x: x["priority"])
 
     def _cleanup_queues(self, provider: str, model: str, now: float):
         if provider not in self.usage:

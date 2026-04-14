@@ -194,9 +194,8 @@ def _distill_with_proactive_routing(
     *,
     chunk_text: str,
     chunk_index: int,
-    provider_order: list[str],
-    model_by_provider: dict[str, str],
-    exhausted_providers: set[str],
+    provider_order: list[tuple[str, str]],
+    exhausted_providers: set[tuple[str, str]],
     provider_attempt_counts: dict[str, int],
     provider_success_counts: dict[str, int],
     api_key: str | None,
@@ -207,6 +206,7 @@ def _distill_with_proactive_routing(
     tracker: TokenTracker,
 ) -> ChunkExtraction:
     last_exc: BaseException | None = None
+    temporarily_exhausted: set[tuple[str, str]] = set()
     
     # 1. 予測トークン数の計算
     est_tokens = tracker.estimate_tokens(chunk_text, max_output_tokens)
@@ -215,19 +215,29 @@ def _distill_with_proactive_routing(
         now = time.time()
         
         # 2. 空いているプロバイダを探す（Proactive Routing）
-        available = [p for p in provider_order if p not in exhausted_providers]
+        # このチャンク内で一時障害になったルートも除外する。
+        available = [r for r in provider_order if r not in exhausted_providers and r not in temporarily_exhausted]
         if not available:
+            if temporarily_exhausted:
+                logger.warning("All fallback providers transiently failed. Sleeping before full retry...")
+                _sleep_before_distill_retry(
+                    attempt,
+                    last_exc or Exception("Transiently empty"),
+                    rate_limit=False,
+                    logger=logger,
+                )
+                temporarily_exhausted.clear()
+                continue
             raise RuntimeError("All providers are exhausted by daily quota limits")
             
         chosen_provider = None
+        chosen_model = None
         wait_times = []
         
-        for p in available:
-            m = model_by_provider.get(p)
-            if not m:
-                continue
+        for p, m in available:
             if tracker.can_accept(p, m, est_tokens, now):
                 chosen_provider = p
+                chosen_model = m
                 break
             else:
                 wait_sec = tracker.time_until_available(p, m, est_tokens, now)
@@ -243,11 +253,13 @@ def _distill_with_proactive_routing(
             time.sleep(min_wait)
             continue # 次のループで再度 can_accept チェック
             
-        active_model = model_by_provider.get(chosen_provider)
+        assert chosen_model is not None
+        active_model = chosen_model
         
         # 3. 抽出の実行
         try:
-            provider_attempt_counts[chosen_provider] = provider_attempt_counts.get(chosen_provider, 0) + 1
+            key = f"{chosen_provider}/{active_model}"
+            provider_attempt_counts[key] = provider_attempt_counts.get(key, 0) + 1
             # 実行前にコミット（失敗しても消費に含める要件）
             tracker.commit_usage(chosen_provider, active_model, est_tokens, time.time())
             
@@ -267,17 +279,11 @@ def _distill_with_proactive_routing(
                 for w in distill.verify_code_snippets_are_substrings(result, chunk_text):
                     logger.warning("chunk %s verify: %s", chunk_index + 1, w)
                     
-            provider_success_counts[chosen_provider] = provider_success_counts.get(chosen_provider, 0) + 1
+            provider_success_counts[key] = provider_success_counts.get(key, 0) + 1
             return result
             
         except BaseException as e:
             last_exc = e
-            if _is_daily_quota_exceeded(e):
-                exhausted_providers.add(chosen_provider)
-                logger.warning(
-                    "provider exhausted by daily quota; skip for remaining chunks: provider=%s",
-                    chosen_provider,
-                )
             logger.warning(
                 "chunk %s distill attempt %s/%s failed provider=%s model=%s: %s",
                 chunk_index + 1,
@@ -287,6 +293,20 @@ def _distill_with_proactive_routing(
                 active_model,
                 e,
             )
+            if _is_daily_quota_exceeded(e):
+                exhausted_providers.add((chosen_provider, active_model))
+                logger.warning(
+                    "provider exhausted by daily quota; skip for remaining chunks: provider=%s",
+                    chosen_provider,
+                )
+            elif _is_transient_api_error(e):
+                logger.warning(
+                    "provider %s is transiently unavailable (503/429). "
+                    "Skipping for this chunk to maximize efficiency.",
+                    chosen_provider,
+                )
+                temporarily_exhausted.add((chosen_provider, active_model))
+                continue
             # Transient error 等による待機 (Fallbackとしての役割)
             if attempt < MAX_DISTILL_ATTEMPTS - 1:
                 _sleep_before_distill_retry(attempt, last_exc, rate_limit=False, logger=logger)
@@ -416,9 +436,7 @@ def process_one_file(
     *,
     repo_root: Path,
     model: str,
-    provider: str,
-    fallback_providers: list[str],
-    model_by_provider: dict[str, str],
+    provider_order: list[tuple[str, str]],
     api_key: str | None,
     logger: logging.Logger,
     max_chars: int,
@@ -446,8 +464,129 @@ def process_one_file(
 
     if dry_run:
         text = path.read_text(encoding="utf-8")
-        chunks = chunker.chunk_markdown(text, max_chars=max_chars, overlap_chars=overlap_chars)
-        logger.info("dry-run: would chunk into n=%s (chars total=%s)", len(chunks), len(text))
+        initial_chunks = chunker.chunk_markdown(text, max_chars=max_chars, overlap_chars=overlap_chars)
+        if not initial_chunks:
+            logger.info("dry-run: no chunks (empty)")
+            return True
+
+        def estimate_chunk(chunk_text: str) -> int:
+            return tracker.estimate_tokens(chunk_text, max_output_tokens)
+
+        max_possible_tpm = 0
+        for p, m in provider_order:
+            tpm = tracker._get_limit(p, m, "tpm", 1000000)
+            max_possible_tpm = max(max_possible_tpm, tpm)
+
+        refined_chunks: list[str] = []
+        for i, ch in enumerate(initial_chunks):
+            before_tokens = estimate_chunk(ch)
+            sub_chunks = chunker.rechunk_by_tokens(
+                ch,
+                estimate_chunk,
+                max_tokens=max_possible_tpm,
+                overlap_chars=overlap_chars,
+            )
+            if len(sub_chunks) > 1:
+                logger.info(
+                    "dry-run rechunk: base_chunk=%s tokens=%s max_tpm=%s -> parts=%s",
+                    i + 1,
+                    before_tokens,
+                    max_possible_tpm,
+                    len(sub_chunks),
+                )
+                for j, sc in enumerate(sub_chunks):
+                    logger.info(
+                        "dry-run rechunk part %s.%s tokens=%s chars=%s",
+                        i + 1,
+                        j + 1,
+                        estimate_chunk(sc),
+                        len(sc),
+                    )
+            refined_chunks.extend(sub_chunks)
+
+        logger.info(
+            "dry-run: initial_chunks=%s refined_chunks=%s chars_total=%s max_output_tokens=%s",
+            len(initial_chunks),
+            len(refined_chunks),
+            len(text),
+            max_output_tokens,
+        )
+
+        start = time.time()
+        now = start
+        n_total = len(refined_chunks)
+        for i, ch in enumerate(refined_chunks):
+            est_tokens = estimate_chunk(ch)
+            while True:
+                chosen_provider: str | None = None
+                chosen_model: str | None = None
+                earliest_wait: float | None = None
+
+                for p, m in provider_order:
+                    if chosen_provider is None and tracker.can_accept(p, m, est_tokens, now):
+                        chosen_provider = p
+                        chosen_model = m
+                    w = tracker.time_until_available(p, m, est_tokens, now)
+                    if w != float("inf"):
+                        if earliest_wait is None or w < earliest_wait:
+                            earliest_wait = w
+
+                if chosen_provider and chosen_model:
+                    tracker.commit_usage(chosen_provider, chosen_model, est_tokens, now)
+                    logger.info(
+                        "dry-run chunk %s/%s t=+%.1fs tokens=%s chosen=%s model=%s",
+                        i + 1,
+                        n_total,
+                        now - start,
+                        est_tokens,
+                        chosen_provider,
+                        chosen_model,
+                    )
+                    for p, m in provider_order:
+                        rpd_lim = tracker._get_limit(p, m, "rpd", 100000)
+                        rpm_lim = tracker._get_limit(p, m, "rpm", 1000)
+                        tpm_lim = tracker._get_limit(p, m, "tpm", 1000000)
+                        rpd, rpm, tpm = tracker.get_current_usage(p, m, now)
+                        rpd_rem = max(0, rpd_lim - rpd)
+                        rpm_rem = max(0, rpm_lim - rpm)
+                        tpm_rem = max(0, tpm_lim - tpm)
+                        mark = "*" if (p == chosen_provider and m == chosen_model) else "-"
+                        logger.info(
+                            "dry-run budget %s provider=%s model=%s rpd=%s/%s rem=%s rpm=%s/%s rem=%s tpm=%s/%s rem=%s",
+                            mark,
+                            p,
+                            m,
+                            rpd,
+                            rpd_lim,
+                            rpd_rem,
+                            rpm,
+                            rpm_lim,
+                            rpm_rem,
+                            tpm,
+                            tpm_lim,
+                            tpm_rem,
+                        )
+                    break
+
+                if earliest_wait is None:
+                    logger.error(
+                        "dry-run chunk %s/%s tokens=%s: no provider can accept (all daily quotas exhausted?)",
+                        i + 1,
+                        n_total,
+                        est_tokens,
+                    )
+                    return True
+
+                logger.info(
+                    "dry-run chunk %s/%s t=+%.1fs tokens=%s: all provider windows full -> sleep %.1fs",
+                    i + 1,
+                    n_total,
+                    now - start,
+                    est_tokens,
+                    earliest_wait,
+                )
+                now += max(0.1, float(earliest_wait))
+
         return True
 
     text = path.read_text(encoding="utf-8")
@@ -455,16 +594,13 @@ def process_one_file(
     if not initial_chunks:
         logger.warning("skip empty after chunk: %s", rel)
         return False
-
-    provider_order = _dedupe_preserve_order_str([provider] + fallback_providers)
     
     def estimate_chunk(chunk_text: str) -> int:
         return tracker.estimate_tokens(chunk_text, max_output_tokens)
     
     # 全プロバイダの中で最大のTPMを取得
     max_possible_tpm = 0
-    for p in provider_order:
-        m = model_by_provider.get(p, model)
+    for p, m in provider_order:
         tpm = tracker._get_limit(p, m, "tpm", 1000000)
         max_possible_tpm = max(max_possible_tpm, tpm)
 
@@ -480,7 +616,7 @@ def process_one_file(
         refined_chunks.extend(sub_chunks)
 
     extractions: list[ChunkExtraction] = []
-    exhausted_providers: set[str] = set()
+    exhausted_providers: set[tuple[str, str]] = set()
     provider_attempt_counts: dict[str, int] = {}
     provider_success_counts: dict[str, int] = {}
     
@@ -517,7 +653,6 @@ def process_one_file(
                     chunk_text=ch,
                     chunk_index=i,
                     provider_order=provider_order,
-                    model_by_provider=model_by_provider,
                     exhausted_providers=exhausted_providers,
                     provider_attempt_counts=provider_attempt_counts,
                     provider_success_counts=provider_success_counts,
@@ -702,13 +837,23 @@ def main(argv: list[str] | None = None) -> int:
 
     log_path = repo_root / "logs" / "pipeline.log"
     logger = _setup_logging(log_path)
-    primary_model = args.model or distill.default_model_for_provider(args.provider)
     fallback_providers = [p.strip() for p in args.fallback_providers.split(",") if p.strip()]
     fallback_providers = [p for p in fallback_providers if p in distill.SUPPORTED_PROVIDERS and p != args.provider]
-    provider_order = _dedupe_preserve_order_str([args.provider] + fallback_providers)
-    model_by_provider = {p: distill.default_model_for_provider(p) for p in provider_order}
-    model_by_provider[args.provider] = primary_model
     api_key: str | None = None
+
+    tracker = TokenTracker(repo_root / "api_limits.json")
+    sorted_configs = tracker.get_sorted_model_configs()
+    if sorted_configs:
+        provider_order = [c["provider"] for c in sorted_configs]
+        model_by_provider = {c["provider"]: c["model"] for c in sorted_configs}
+        route_order: list[tuple[str, str]] = [(c["provider"], c["model"]) for c in sorted_configs]
+        primary_model = sorted_configs[0]["model"]
+    else:
+        primary_model = args.model or distill.default_model_for_provider(args.provider)
+        provider_order = _dedupe_preserve_order_str([args.provider] + fallback_providers)
+        model_by_provider = {p: distill.default_model_for_provider(p) for p in provider_order}
+        model_by_provider[args.provider] = primary_model
+        route_order = [(p, model_by_provider[p]) for p in provider_order]
 
     if not args.dry_run:
         missing: list[str] = []
@@ -718,7 +863,9 @@ def main(argv: list[str] | None = None) -> int:
             "groq": "GROQ_API_KEY",
             "mistral": "MISTRAL_API_KEY",
         }
-        for p in provider_order:
+        for p in sorted(set(x[0] for x in route_order)):
+            if p not in env_by_provider:
+                continue
             if not os.environ.get(env_by_provider[p]):
                 missing.append(env_by_provider[p])
         if missing:
@@ -727,8 +874,6 @@ def main(argv: list[str] | None = None) -> int:
 
     input_dir = repo_root / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
-    
-    tracker = TokenTracker(repo_root / "api_limits.json")
 
     def cycle() -> None:
         if args.only:
@@ -750,9 +895,7 @@ def main(argv: list[str] | None = None) -> int:
                     f,
                     repo_root=repo_root,
                     model=primary_model,
-                    provider=args.provider,
-                    fallback_providers=fallback_providers,
-                    model_by_provider=model_by_provider,
+                    provider_order=route_order,
                     api_key=api_key,
                     logger=logger,
                     max_chars=args.max_chars,
@@ -768,6 +911,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             except BaseException:
                 logger.error("unexpected outer failure on %s\n%s", f, traceback.format_exc())
+
+    if args.dry_run:
+        cycle()
+        return 0
 
     if args.once or args.interval <= 0:
         cycle()
