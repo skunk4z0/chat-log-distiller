@@ -31,7 +31,8 @@ python scripts/main.py --once --only <target-file> --dry-run --max-chars <N>
 
 - まず `--max-chars` を小さくしすぎない（小さすぎると chunk 数が増えて RPD を消費）。
 - JSON 末尾欠け（`EOF while parsing a string`）が出る場合のみ `--max-chars` を段階的に下げる。
-- `503` は混雑なので時間を空ける。`429` で `...PerDay...` が出たら当日中の再実行は原則停止。
+- `503` / 一時的 `429` はチャンク内で即時フォールバックされる（全候補が一時失敗した場合のみバックオフ）。
+- `429` で `...PerDay...` が出たら当日中の再実行は原則停止。
 - `failed/` に落ちたファイルを翌日 `--only failed/<file>` で再実行し、成功時に `archive/` へ着地させる。
 
 ### RPM/TPM は余裕でも RPD で止まる問題（実測）
@@ -115,6 +116,7 @@ python scripts/distill.py --chunk-file fixtures/01_minimal_fence.md --prefer-ver
 python scripts/main.py --once --only input\sample.md --fast --no-archive --model gemini-2.0-flash
 ```
 
+`--only` 指定時は対象ファイルの処理完了直後に自動終了する。  
 出力 `output/YYYY-MM-DD_*.md` の YAML と各 `##` セクションを確認。本番寄りの待機なら `--fast` を外す。
 
 ## 4. Vault との接続（運用）
@@ -127,4 +129,4 @@ python scripts/main.py --once --only input\sample.md --fast --no-archive --model
 |------|------------|
 | `selftest` 失敗 | `chunker.py` / `md_nodes.py` / `merge.py` |
 | 抽出 JSON の幻覚・言い換え | `distill.py` の system 文面、温度（0）、モデル ID |
-| 503 / 429 | モデル負荷・`main.py` の待機・時刻をずらして再実行 |
+| 503 / 429 | 一時エラーは自動フォールバック。`PerDay` 系 429 は翌日再実行を優先 |

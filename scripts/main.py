@@ -325,16 +325,25 @@ def _build_topic(merged: MergedExtraction, source_stem: str) -> str:
     return source_stem[:200]
 
 
+def _context_highlights(ctx: str, *, max_lines: int = 12, max_line_chars: int = 220) -> tuple[list[str], bool]:
+    lines = [ln.strip() for ln in ctx.splitlines() if ln.strip()]
+    if not lines:
+        return [], False
+
+    picked: list[str] = []
+    for ln in lines:
+        if picked and picked[-1] == ln:
+            continue
+        if len(ln) > max_line_chars:
+            ln = ln[: max_line_chars - 3] + "..."
+        picked.append(ln)
+        if len(picked) >= max_lines:
+            break
+    return picked, len(lines) > len(picked)
+
+
 def _build_body(merged: MergedExtraction) -> str:
     parts: list[str] = []
-
-    parts.append("## Context\n")
-    for i, ctx in enumerate(merged.contexts, start=1):
-        parts.append(f"### Chunk {i}\n")
-        if ctx:
-            parts.append(ctx.strip() + "\n\n")
-        else:
-            parts.append("_（なし）_\n\n")
 
     parts.append("## Entities\n")
     if merged.entities:
@@ -360,6 +369,28 @@ def _build_body(merged: MergedExtraction) -> str:
     else:
         parts.append("_（なし）_\n")
     parts.append("\n")
+
+    parts.append("## Context\n")
+    for i, ctx in enumerate(merged.contexts, start=1):
+        parts.append(f"### Chunk {i}\n")
+        if not ctx:
+            parts.append("_（なし）_\n\n")
+            continue
+
+        highlights, is_truncated = _context_highlights(ctx)
+        if highlights:
+            parts.append("- Evidence highlights:\n")
+            for ln in highlights:
+                parts.append(f"  - {ln}\n")
+            if is_truncated:
+                parts.append("  - ... (truncated in highlights; see raw context below)\n")
+        else:
+            parts.append("_（なし）_\n")
+
+        parts.append("\n<details>\n")
+        parts.append("<summary>Verbatim context (raw)</summary>\n\n")
+        parts.append(ctx.strip() + "\n")
+        parts.append("</details>\n\n")
 
     parts.append("## Code snippets\n")
     if merged.code_snippets:
@@ -625,7 +656,7 @@ def process_one_file(
     
     process_date = datetime.now().strftime("%Y-%m-%d")
     out_name = _output_name(process_date, path)
-    cache_dir = output_dir / f".cache_{out_name}"
+    cache_dir = output_dir / f".cache_{path.stem}.md"
     cache_dir.mkdir(parents=True, exist_ok=True)
     
     chunks = refined_chunks
@@ -715,6 +746,9 @@ def process_one_file(
                 dest = archive_dir / _archive_name(path)
                 shutil.move(str(path), str(dest))
                 logger.info("archived -> %s", dest.relative_to(repo_root))
+                logger.info(
+                    "Next step: check distilled note under output/ in your Obsidian vault."
+                )
             else:
                 logger.warning("archive skipped: source file already missing: %s", rel)
                 
@@ -909,6 +943,9 @@ def main(argv: list[str] | None = None) -> int:
                     max_output_tokens=args.max_output_tokens,
                     tracker=tracker,
                 )
+                if args.only:
+                    logger.info("--only target has been processed; exiting.")
+                    sys.exit(0)
             except BaseException:
                 logger.error("unexpected outer failure on %s\n%s", f, traceback.format_exc())
 

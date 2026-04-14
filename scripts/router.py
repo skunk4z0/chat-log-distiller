@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 
 FILENAME_STAMP_RE = re.compile(r"^(?P<date>\d{4}-\d{2}-\d{2})_(?:\d{8}_\d{6}_)+(?P<rest>.+)$")
+DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 STATUS_MAP: dict[str, str] = {
@@ -157,6 +158,19 @@ def _clean_md_filename(filename: str) -> str:
     return f"{m.group('date')}_{m.group('rest')}"
 
 
+def _structured_filename_from_source(filename: str) -> str:
+    """
+    Build destination filename as `<source-date>_structured.md`.
+    If multiple dates are present in the filename, prefer the last one
+    (usually the original raw log date after processing prefixes).
+    """
+    dates = DATE_RE.findall(filename)
+    if dates:
+        return f"{dates[-1]}_structured.md"
+    cleaned = _clean_md_filename(filename)
+    return f"{Path(cleaned).stem}_structured.md"
+
+
 def _unique_dest_path(dst_dir: Path, filename: str) -> Path:
     base = Path(filename)
     candidate = dst_dir / base.name
@@ -200,8 +214,8 @@ def main() -> int:
             rewritten = _dump_front_matter(new_fm) + body
             p.write_text(rewritten, encoding="utf-8")
 
-            cleaned_name = _clean_md_filename(p.name)
-            dest_path = _unique_dest_path(dst_dir, cleaned_name)
+            structured_name = _structured_filename_from_source(p.name)
+            dest_path = _unique_dest_path(dst_dir, structured_name)
             shutil.move(str(p), str(dest_path))
             processed += 1
             print(f"MOVED: output/{p.name} -> {dest_path}")
