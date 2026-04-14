@@ -1,0 +1,50 @@
+{
+  "gemini": {
+    "gemini-2.5-flash": {
+      "rpd": 1500,
+      "rpm": 15,
+      "tpm": 1000000
+    },
+    "gemini-2.5-flash-lite": {
+      "rpd": 1500,
+      "rpm": 15,
+      "tpm": 1000000
+    },
+    "gemini-2.0-flash": {
+      "rpd": 1500,
+      "rpm": 15,
+      "tpm": 1000000
+    }
+  },
+  "openrouter": {
+    "google/gemini-2.5-flash-lite": {
+      "rpd": 100000,
+      "rpm": 200,
+      "tpm": 2000000
+    },
+    "google/gemini-2.5-flash": {
+      "rpd": 100000,
+      "rpm": 200,
+      "tpm": 2000000
+    }
+  },
+  "groq": {
+    "llama-3.3-70b-versatile": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 6000
+    },
+    "llama-3.1-8b-instant": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 18000
+    }
+  },
+  "mistral": {
+    "mistral-large-latest": {
+      "rpd": 100000,
+      "rpm": 60,
+      "tpm": 2000000
+    }
+  }
+}
