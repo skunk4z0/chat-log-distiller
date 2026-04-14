@@ -16,6 +16,7 @@ import shutil
 import sys
 import time
 import traceback
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,7 @@ import chunker
 import distill
 import merge
 from models import ChunkExtraction, MergedExtraction
+from waterfall_router import TokenTracker
 
 # Between every Gemini API call (per spec).
 INTER_REQUEST_SLEEP_SEC = 5
@@ -188,13 +190,11 @@ def _sleep_before_distill_retry(
         time.sleep(INTER_REQUEST_SLEEP_SEC)
 
 
-def _distill_one_chunk(
+def _distill_with_proactive_routing(
     *,
     chunk_text: str,
     chunk_index: int,
-    model: str,
-    provider: str,
-    fallback_providers: list[str],
+    provider_order: list[str],
     model_by_provider: dict[str, str],
     exhausted_providers: set[str],
     provider_attempt_counts: dict[str, int],
@@ -203,54 +203,94 @@ def _distill_one_chunk(
     logger: logging.Logger,
     prefer_verbatim_fences: bool,
     no_verify: bool,
-    rate_limit: bool,
     max_output_tokens: int | None,
+    tracker: TokenTracker,
 ) -> ChunkExtraction:
     last_exc: BaseException | None = None
-    provider_order = _dedupe_preserve_order_str([provider] + fallback_providers)
+    
+    # 1. 予測トークン数の計算
+    est_tokens = tracker.estimate_tokens(chunk_text, max_output_tokens)
+    
     for attempt in range(MAX_DISTILL_ATTEMPTS):
+        now = time.time()
+        
+        # 2. 空いているプロバイダを探す（Proactive Routing）
         available = [p for p in provider_order if p not in exhausted_providers]
         if not available:
             raise RuntimeError("All providers are exhausted by daily quota limits")
-        provider_idx = min(attempt, len(available) - 1)
-        active_provider = available[provider_idx]
-        active_model = model_by_provider.get(active_provider, model)
+            
+        chosen_provider = None
+        wait_times = []
+        
+        for p in available:
+            m = model_by_provider.get(p)
+            if not m:
+                continue
+            if tracker.can_accept(p, m, est_tokens, now):
+                chosen_provider = p
+                break
+            else:
+                wait_sec = tracker.time_until_available(p, m, est_tokens, now)
+                if wait_sec != float('inf'):
+                    wait_times.append(wait_sec)
+        
+        # 全滅時は最も早く空く時間まで待機
+        if not chosen_provider:
+            if not wait_times:
+                raise RuntimeError("All providers have exhausted their daily quotas for this chunk size.")
+            min_wait = min(wait_times)
+            logger.info("All provider windows full. Sleeping %.1fs for the earliest slot...", min_wait)
+            time.sleep(min_wait)
+            continue # 次のループで再度 can_accept チェック
+            
+        active_model = model_by_provider.get(chosen_provider)
+        
+        # 3. 抽出の実行
         try:
-            provider_attempt_counts[active_provider] = provider_attempt_counts.get(active_provider, 0) + 1
+            provider_attempt_counts[chosen_provider] = provider_attempt_counts.get(chosen_provider, 0) + 1
+            # 実行前にコミット（失敗しても消費に含める要件）
+            tracker.commit_usage(chosen_provider, active_model, est_tokens, time.time())
+            
             result = distill.run_extraction(
-                provider=active_provider,
+                provider=chosen_provider,
                 chunk_text=chunk_text,
                 model=active_model,
                 api_key=api_key,
                 max_output_tokens=max_output_tokens,
             )
+            
             if prefer_verbatim_fences:
                 verbatim = distill.verbatim_code_snippets_from_ast(chunk_text)
                 result = result.model_copy(update={"code_snippets": verbatim})
+                
             if not no_verify:
                 for w in distill.verify_code_snippets_are_substrings(result, chunk_text):
                     logger.warning("chunk %s verify: %s", chunk_index + 1, w)
-            provider_success_counts[active_provider] = provider_success_counts.get(active_provider, 0) + 1
+                    
+            provider_success_counts[chosen_provider] = provider_success_counts.get(chosen_provider, 0) + 1
             return result
+            
         except BaseException as e:
             last_exc = e
             if _is_daily_quota_exceeded(e):
-                exhausted_providers.add(active_provider)
+                exhausted_providers.add(chosen_provider)
                 logger.warning(
                     "provider exhausted by daily quota; skip for remaining chunks: provider=%s",
-                    active_provider,
+                    chosen_provider,
                 )
             logger.warning(
                 "chunk %s distill attempt %s/%s failed provider=%s model=%s: %s",
                 chunk_index + 1,
                 attempt + 1,
                 MAX_DISTILL_ATTEMPTS,
-                active_provider,
+                chosen_provider,
                 active_model,
                 e,
             )
+            # Transient error 等による待機 (Fallbackとしての役割)
             if attempt < MAX_DISTILL_ATTEMPTS - 1:
-                _sleep_before_distill_retry(attempt, last_exc, rate_limit, logger)
+                _sleep_before_distill_retry(attempt, last_exc, rate_limit=False, logger=logger)
+                
     assert last_exc is not None
     raise last_exc
 
@@ -317,6 +357,7 @@ def _build_obsidian_note(
     *,
     source_rel: str,
     model: str,
+    is_partial: bool = False,
 ) -> str:
     base_tags = ["chat-distilled", "distilled-log"]
     entity_tags = [_sanitize_tag(e) for e in merged.entities[:30]]
@@ -338,6 +379,11 @@ def _build_obsidian_note(
         "chunk_count": merged.chunk_count,
         "model": model,
     }
+    
+    if is_partial:
+        fm["review_status"] = "進行中（中断）"
+        fm["is_partial"] = True
+        
     header = yaml.safe_dump(fm, allow_unicode=True, sort_keys=False, default_flow_style=False).rstrip()
     body = _build_body(merged)
     return f"---\n{header}\n---\n\n{body}"
@@ -384,6 +430,7 @@ def process_one_file(
     no_archive: bool,
     fast_inter_chunk_sec: float,
     max_output_tokens: int | None,
+    tracker: TokenTracker,
 ) -> bool:
     try:
         rel = path.relative_to(repo_root)
@@ -404,38 +451,96 @@ def process_one_file(
         return True
 
     text = path.read_text(encoding="utf-8")
-    chunks = chunker.chunk_markdown(text, max_chars=max_chars, overlap_chars=overlap_chars)
-    if not chunks:
+    initial_chunks = chunker.chunk_markdown(text, max_chars=max_chars, overlap_chars=overlap_chars)
+    if not initial_chunks:
         logger.warning("skip empty after chunk: %s", rel)
         return False
+
+    provider_order = _dedupe_preserve_order_str([provider] + fallback_providers)
+    
+    def estimate_chunk(chunk_text: str) -> int:
+        return tracker.estimate_tokens(chunk_text, max_output_tokens)
+    
+    # 全プロバイダの中で最大のTPMを取得
+    max_possible_tpm = 0
+    for p in provider_order:
+        m = model_by_provider.get(p, model)
+        tpm = tracker._get_limit(p, m, "tpm", 1000000)
+        max_possible_tpm = max(max_possible_tpm, tpm)
+
+    # 再帰的な再分割（re-chunking）でTPM制限に収める
+    refined_chunks = []
+    for ch in initial_chunks:
+        sub_chunks = chunker.rechunk_by_tokens(
+            ch, 
+            estimate_chunk, 
+            max_tokens=max_possible_tpm, 
+            overlap_chars=overlap_chars
+        )
+        refined_chunks.extend(sub_chunks)
 
     extractions: list[ChunkExtraction] = []
     exhausted_providers: set[str] = set()
     provider_attempt_counts: dict[str, int] = {}
     provider_success_counts: dict[str, int] = {}
+    
+    output_dir = repo_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    process_date = datetime.now().strftime("%Y-%m-%d")
+    out_name = _output_name(process_date, path)
+    cache_dir = output_dir / f".cache_{out_name}"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    
+    chunks = refined_chunks
+    is_partial_abort = False
+    
     try:
         for i, ch in enumerate(chunks):
+            cache_file = cache_dir / f"chunk_{i:04d}.json"
+            
+            # キャッシュからのロード
+            if cache_file.exists():
+                logger.info("chunk %s/%s loaded from cache", i + 1, len(chunks))
+                try:
+                    cached_text = cache_file.read_text(encoding="utf-8")
+                    ex = ChunkExtraction.model_validate_json(cached_text)
+                    extractions.append(ex)
+                    continue
+                except Exception as e:
+                    logger.warning("Failed to load cache %s, re-processing: %s", cache_file, e)
+
             logger.info("distill chunk %s/%s chars=%s", i + 1, len(chunks), len(ch))
-            ex = _distill_one_chunk(
-                chunk_text=ch,
-                chunk_index=i,
-                model=model,
-                provider=provider,
-                fallback_providers=fallback_providers,
-                model_by_provider=model_by_provider,
-                exhausted_providers=exhausted_providers,
-                provider_attempt_counts=provider_attempt_counts,
-                provider_success_counts=provider_success_counts,
-                api_key=api_key,
-                logger=logger,
-                prefer_verbatim_fences=prefer_verbatim_fences,
-                no_verify=no_verify,
-                rate_limit=rate_limit,
-                max_output_tokens=max_output_tokens,
-            )
+            
+            try:
+                ex = _distill_with_proactive_routing(
+                    chunk_text=ch,
+                    chunk_index=i,
+                    provider_order=provider_order,
+                    model_by_provider=model_by_provider,
+                    exhausted_providers=exhausted_providers,
+                    provider_attempt_counts=provider_attempt_counts,
+                    provider_success_counts=provider_success_counts,
+                    api_key=api_key,
+                    logger=logger,
+                    prefer_verbatim_fences=prefer_verbatim_fences,
+                    no_verify=no_verify,
+                    max_output_tokens=max_output_tokens,
+                    tracker=tracker,
+                )
+            except RuntimeError as e:
+                # 全プロバイダのQuota枯渇等による致命的エラー
+                if "exhausted" in str(e).lower() or "windows full" in str(e).lower():
+                    logger.error("Aborting chunk processing due to limit exhaustion: %s", e)
+                    is_partial_abort = True
+                    break
+                raise
+                
             extractions.append(ex)
+            cache_file.write_text(ex.model_dump_json(indent=2), encoding="utf-8")
+            
             # Spacing between successful chunk requests (last chunk: nothing follows).
-            if i < len(chunks) - 1:
+            if i < len(chunks) - 1 and not is_partial_abort:
                 if rate_limit:
                     time.sleep(INTER_REQUEST_SLEEP_SEC)
                 elif fast_inter_chunk_sec > 0:
@@ -447,16 +552,24 @@ def process_one_file(
                     )
                     time.sleep(fast_inter_chunk_sec)
 
-        merged: MergedExtraction = merge.merge_chunk_extractions(extractions)
-        process_date = datetime.now().strftime("%Y-%m-%d")
-        out_name = _output_name(process_date, path)
-        body = _build_obsidian_note(merged, source_rel=str(rel), model=model)
+        if not extractions:
+            logger.warning("no successful extractions for file=%s", rel)
+            return False
 
-        output_dir = repo_root / "output"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        merged: MergedExtraction = merge.merge_chunk_extractions(extractions)
+        
+        if is_partial_abort:
+            out_name = f"[Partial]_{out_name}"
+            
+        body = _build_obsidian_note(merged, source_rel=str(rel), model=model, is_partial=is_partial_abort)
+
         out_path = _unique_output_path(output_dir, out_name)
         out_path.write_text(body, encoding="utf-8")
         logger.info("wrote %s", out_path.relative_to(repo_root))
+
+        if is_partial_abort:
+            logger.warning("File partially processed and saved. Original file kept in input.")
+            return False # アーカイブさせない
 
         if no_archive:
             logger.info("skip archive (--no-archive)")
@@ -469,6 +582,10 @@ def process_one_file(
                 logger.info("archived -> %s", dest.relative_to(repo_root))
             else:
                 logger.warning("archive skipped: source file already missing: %s", rel)
+                
+        # 正常終了時のみキャッシュをクリーンアップ
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        
         logger.info(
             "provider usage summary attempts=%s successes=%s exhausted=%s",
             provider_attempt_counts,
@@ -610,6 +727,8 @@ def main(argv: list[str] | None = None) -> int:
 
     input_dir = repo_root / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
+    
+    tracker = TokenTracker(repo_root / "api_limits.json")
 
     def cycle() -> None:
         if args.only:
@@ -645,6 +764,7 @@ def main(argv: list[str] | None = None) -> int:
                     no_archive=args.no_archive,
                     fast_inter_chunk_sec=fast_gap,
                     max_output_tokens=args.max_output_tokens,
+                    tracker=tracker,
                 )
             except BaseException:
                 logger.error("unexpected outer failure on %s\n%s", f, traceback.format_exc())

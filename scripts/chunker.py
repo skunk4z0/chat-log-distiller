@@ -243,6 +243,46 @@ def chunk_markdown(
     return chunks
 
 
+def rechunk_by_tokens(
+    text: str,
+    tracker_estimate_fn,
+    max_tokens: int,
+    overlap_chars: int = DEFAULT_OVERLAP_CHARS,
+) -> list[str]:
+    """
+    Recursively split text until every chunk is within `max_tokens` when passed to `tracker_estimate_fn`.
+    """
+    if tracker_estimate_fn(text) <= max_tokens:
+        return [text]
+
+    # Binary search approach for max_chars to meet token budget
+    low_chars = 100
+    high_chars = len(text)
+    best_chunks = []
+    
+    while low_chars <= high_chars:
+        mid_chars = (low_chars + high_chars) // 2
+        try:
+            cand_chunks = chunk_markdown(text, max_chars=mid_chars, overlap_chars=overlap_chars)
+            # Check if all cand_chunks fit the token budget
+            all_fit = all(tracker_estimate_fn(c) <= max_tokens for c in cand_chunks)
+            if all_fit:
+                best_chunks = cand_chunks
+                low_chars = mid_chars + 1 # try to make them as large as possible
+            else:
+                high_chars = mid_chars - 1
+        except RuntimeError:
+            high_chars = mid_chars - 1
+
+    if not best_chunks:
+        # Fallback if binary search fails to find a strictly compliant semantic split:
+        # Just return extremely aggressive char split
+        best_chunks = chunk_markdown(text, max_chars=500, overlap_chars=0)
+        
+    return best_chunks
+
+
+
 def _preview_lines(text: str, k: int = 5) -> str:
     parts = text.splitlines()
     head = parts[:k]
