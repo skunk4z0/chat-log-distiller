@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import IO, TextIO
 
 
 RAW_NAME_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})_ai_raw")
@@ -87,25 +90,77 @@ def _import_raw_files(raw_dir: Path, input_dir: Path, dry_run: bool, limit: int 
 
 def _run_step(cmd: list[str], cwd: Path) -> int:
     print(f"RUN: {' '.join(cmd)}")
-    cp = subprocess.run(cmd, cwd=str(cwd))
+    env = _subprocess_child_env()
+    cp = subprocess.run(cmd, cwd=str(cwd), env=env)
     return int(cp.returncode)
 
 
+def _subprocess_child_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def _drain_text_stream(stream: IO[str], *, echo: TextIO | None) -> str:
+    """Read a text-mode subprocess stream line-by-line; echo each line if requested."""
+    parts: list[str] = []
+    readline = getattr(stream, "readline", None)
+    close = getattr(stream, "close", None)
+    if readline is None:
+        return ""
+    while True:
+        line = readline()
+        if line == "":
+            break
+        parts.append(line)
+        if echo is not None and line:
+            print(line, end="", file=echo)
+    if close:
+        close()
+    return "".join(parts)
+
+
 def _run_step_capture(cmd: list[str], cwd: Path) -> tuple[int, str]:
+    """
+    Run a subprocess and capture combined output for quota detection.
+
+    Avoids PIPE deadlocks on large logs by draining stdout/stderr concurrently
+    (subprocess.run(capture_output=True) buffers entire streams in memory).
+    """
     print(f"RUN: {' '.join(cmd)}")
-    cp = subprocess.run(
+    env = _subprocess_child_env()
+    proc = subprocess.Popen(
         cmd,
         cwd=str(cwd),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         errors="replace",
+        bufsize=1,
+        env=env,
     )
-    if cp.stdout:
-        print(cp.stdout, end="")
-    if cp.stderr:
-        print(cp.stderr, end="", file=sys.stderr)
-    combined = (cp.stdout or "") + "\n" + (cp.stderr or "")
-    return int(cp.returncode), combined
+    stdout_parts: list[str] = []
+    stderr_parts: list[str] = []
+
+    def _drain_stdout() -> None:
+        if proc.stdout is not None:
+            stdout_parts.append(_drain_text_stream(proc.stdout, echo=sys.stdout))
+
+    def _drain_stderr() -> None:
+        if proc.stderr is not None:
+            stderr_parts.append(_drain_text_stream(proc.stderr, echo=sys.stderr))
+
+    t_out = threading.Thread(target=_drain_stdout, name="pipe-stdout", daemon=True)
+    t_err = threading.Thread(target=_drain_stderr, name="pipe-stderr", daemon=True)
+    t_out.start()
+    t_err.start()
+    rc = int(proc.wait())
+    t_out.join()
+    t_err.join()
+    stdout_s = stdout_parts[0] if stdout_parts else ""
+    stderr_s = stderr_parts[0] if stderr_parts else ""
+    combined = stdout_s + "\n" + stderr_s
+    return rc, combined
 
 
 def _cooldown_path(repo_root: Path, configured: str) -> Path:
