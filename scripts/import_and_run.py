@@ -24,6 +24,7 @@ from typing import IO, TextIO
 
 
 RAW_NAME_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})_ai_raw")
+FAILED_PREFIX_RE = re.compile(r"^(?P<stamp>\d{8}_\d{6})_(?P<rest>.+)$")
 DEFAULT_RAW_DIR = Path(r"C:\Users\daiya\Documents\Obsidian_Vault\300_Resources\AI_Logs\01_Raw")
 DEFAULT_COOLDOWN_FILE = ".quota_cooldown.json"
 EXHAUSTION_MARKERS = (
@@ -63,6 +64,59 @@ def _collect_input_files(input_dir: Path) -> list[Path]:
     files = [p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in {".md", ".txt"}]
     files.sort(key=lambda p: (_extract_date_for_sort(p.name), p.name.lower()), reverse=True)
     return files
+
+
+def _restore_failed_basename(name: str) -> str:
+    """
+    failed/ 退避名 `YYYYMMDD_HHMMSS_<original>` から元ファイル名を復元する。
+    形式に一致しない場合はそのまま返す。
+    """
+    m = FAILED_PREFIX_RE.match(name)
+    if not m:
+        return name
+    return m.group("rest")
+
+
+def _collect_failed_candidates(failed_dir: Path) -> list[tuple[Path, str]]:
+    if not failed_dir.exists():
+        return []
+    out: list[tuple[Path, str]] = []
+    for p in failed_dir.iterdir():
+        if not p.is_file() or p.suffix.lower() not in {".md", ".txt"}:
+            continue
+        restored_name = _restore_failed_basename(p.name)
+        out.append((p, restored_name))
+    out.sort(key=lambda x: (_extract_date_for_sort(x[1]), x[1].lower()), reverse=True)
+    return out
+
+
+def _resume_from_failed(
+    failed_dir: Path,
+    input_dir: Path,
+    *,
+    dry_run: bool,
+    limit: int | None,
+) -> list[str]:
+    candidates = _collect_failed_candidates(failed_dir)
+    if not candidates:
+        return []
+    if limit is not None:
+        candidates = candidates[:limit]
+
+    resumed_names: list[str] = []
+    for src, restored_name in candidates:
+        dest = input_dir / restored_name
+        if dest.exists():
+            print(f"SKIP failed resume (already exists in input): {dest}")
+            resumed_names.append(restored_name)
+            continue
+        print(f"RESUME FAILED: {src} -> {dest}")
+        if not dry_run:
+            shutil.move(str(src), str(dest))
+        resumed_names.append(restored_name)
+    if resumed_names:
+        print(f"Resumed from failed: {len(resumed_names)}")
+    return resumed_names
 
 
 def _import_raw_files(raw_dir: Path, input_dir: Path, dry_run: bool, limit: int | None) -> int:
@@ -255,6 +309,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = _repo_root()
     input_dir = repo_root / "input"
+    failed_dir = repo_root / "failed"
 
     if not args.raw_dir.exists():
         print(f"Raw directory not found: {args.raw_dir}", file=sys.stderr)
@@ -268,14 +323,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     input_dir.mkdir(parents=True, exist_ok=True)
-    pending_input = _collect_input_files(input_dir)
-    if pending_input:
-        print(
-            f"Pending input files detected ({len(pending_input)}). "
-            "Prioritizing input/ and skipping raw import."
-        )
+    resumed_names = _resume_from_failed(failed_dir, input_dir, dry_run=args.dry_run, limit=args.limit)
+    if resumed_names:
+        print("Prioritizing resumed failed files over existing input/ and raw import.")
     else:
-        _import_raw_files(args.raw_dir, input_dir, args.dry_run, args.limit)
+        pending_input = _collect_input_files(input_dir)
+        if pending_input:
+            print(
+                f"Pending input files detected ({len(pending_input)}). "
+                "Prioritizing input/ and skipping raw import."
+            )
+        else:
+            _import_raw_files(args.raw_dir, input_dir, args.dry_run, args.limit)
 
     cooldown_file = _cooldown_path(repo_root, args.cooldown_file)
     now = datetime.now(timezone.utc)
@@ -284,9 +343,9 @@ def main(argv: list[str] | None = None) -> int:
         remaining = cooldown_until - now
         print(
             f"Cooldown active until {cooldown_until.isoformat()} "
-            f"(remaining ~{remaining}). Skip this run."
+            f"(remaining ~{remaining}). "
+            "Continue run to allow non-exhausted providers."
         )
-        return 0
     if cooldown_until and now >= cooldown_until:
         try:
             cooldown_file.unlink()
@@ -294,6 +353,16 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     targets = _collect_input_files(input_dir)
+    if args.dry_run and resumed_names:
+        known = {p.name for p in targets}
+        for name in resumed_names:
+            if name not in known:
+                targets.append(input_dir / name)
+    if resumed_names:
+        resumed_set = set(resumed_names)
+        resumed_targets = [p for p in targets if p.name in resumed_set]
+        other_targets = [p for p in targets if p.name not in resumed_set]
+        targets = resumed_targets + other_targets
     if args.limit is not None:
         targets = targets[: args.limit]
     if targets:

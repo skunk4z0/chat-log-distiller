@@ -160,6 +160,17 @@ def _is_daily_quota_exceeded(exc: BaseException) -> bool:
     )
 
 
+def _is_invalid_json_output(exc: BaseException) -> bool:
+    """Model returned malformed/truncated JSON that fails schema parsing."""
+    s = str(exc).lower()
+    return (
+        "invalid json" in s
+        or "json_invalid" in s
+        or "eof while parsing" in s
+        or "unterminated string" in s
+    )
+
+
 def _sleep_before_distill_retry(
     attempt: int,
     exc: BaseException,
@@ -303,6 +314,14 @@ def _distill_with_proactive_routing(
                 logger.warning(
                     "provider %s is transiently unavailable (503/429). "
                     "Skipping for this chunk to maximize efficiency.",
+                    chosen_provider,
+                )
+                temporarily_exhausted.add((chosen_provider, active_model))
+                continue
+            elif _is_invalid_json_output(e):
+                logger.warning(
+                    "provider %s returned malformed JSON. "
+                    "Skipping for this chunk and trying fallback provider/model immediately.",
                     chosen_provider,
                 )
                 temporarily_exhausted.add((chosen_provider, active_model))
@@ -946,7 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.only:
                     logger.info("--only target has been processed; exiting.")
                     sys.exit(0)
-            except BaseException:
+            except Exception:
                 logger.error("unexpected outer failure on %s\n%s", f, traceback.format_exc())
 
     if args.dry_run:

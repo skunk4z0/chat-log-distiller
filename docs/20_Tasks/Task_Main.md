@@ -41,7 +41,7 @@
 
 - [x] `scripts/router.py`: `output/` の構造化 Markdown を Vault（`OBSIDIAN_VAULT_PATH` 配下）へ移動し、YAML を採用語彙へ正規化
   - 移動先ファイル名: 元ファイル名に含まれる日付（複数ある場合は最後）を採用し `<日付>_structured.md` とする。重複時は連番付与（`_1`, `_2`, ...）
-- [x] **ワンショット運用**: `scripts/import_and_run.py` — Raw（`01_Raw`）→ `input/` 取り込み → `main.py` → `router.py` を1回で実行。`input/` に `.md`/`.txt` がある場合は Raw 取り込みをスキップして `input/` を優先。`--limit 1` で最新1件のみ。無料枠枯渇検知時は `.quota_cooldown.json` でクールダウン後に再開（`--cooldown-hours` / `--no-router` あり）
+- [x] **ワンショット運用**: `scripts/import_and_run.py` — Raw（`01_Raw`）→ `input/` 取り込み → `main.py` → `router.py` を1回で実行。`failed/` に再開可能ファイルがある場合は最優先で `input/` へ戻して再開（`YYYYMMDD_HHMMSS_` 接頭辞を外して元名へ復元し、キャッシュ名と一致）。`failed/` が空のときは `input/` を優先し、`input/` も空なら Raw 取り込み。`--limit 1` で1件だけ処理。無料枠枯渇検知時は `.quota_cooldown.json` でクールダウン後に再開（`--cooldown-hours` / `--no-router` あり）
 
 ## Future Backlog（現時点では見送り）
 
