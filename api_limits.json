@@ -19,12 +19,50 @@
       "priority": 3
     }
   },
+  "groq": {
+    "llama-3.1-8b-instant": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 6000,
+      "priority": 4
+    },
+    "llama-3.3-70b-versatile": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 6000,
+      "priority": 5
+    },
+    "qwen/qwen3-32b": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 6000,
+      "priority": 6
+    },
+    "mixtral-8x7b-32768": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 5000,
+      "priority": 7
+    },
+    "meta-llama/llama-4-scout-17b-16e-instruct": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 30000,
+      "priority": 8
+    },
+    "openai/gpt-oss-20b": {
+      "rpd": 14400,
+      "rpm": 30,
+      "tpm": 6000,
+      "priority": 9
+    }
+  },
   "mistral": {
     "mistral-small-latest": {
       "rpd": 1440,
       "rpm": 1,
       "tpm": 50000,
-      "priority": 4
+      "priority": 10
     }
   },
   "openrouter": {
@@ -32,7 +70,7 @@
       "rpd": 50,
       "rpm": 20,
       "tpm": 100000,
-      "priority": 5
+      "priority": 11
     }
   }
 }
