@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Final
@@ -25,50 +26,133 @@ from md_nodes import fenced_blocks_from_markdown
 from models import ChunkExtraction, CodeSnippet, extraction_json_schema
 
 SUPPORTED_PROVIDERS: Final[set[str]] = {"gemini", "openrouter", "groq", "mistral"}
+INLINE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(?P<key>[^:\n]{1,64})::\s*(?P<value>.*)$")
+KNOWN_INLINE_KEYS: Final[set[str]] = {
+    "理解度",
+    "重要度",
+    "謎ポイント",
+    "後で調べる",
+    "復習リンク",
+    "発生エラー",
+    "AIの仮説",
+    "解決アクション",
+    "没プラン",
+    "採用プラン",
+    "撤退理由",
+    "対象ファイル",
+    "対象クラス",
+    "対象関数",
+    "対象変数",
+    "コード断片",
+    "アイデアナゲット",
+    "懸念点",
+    "検証事項",
+    "提供価値",
+    "マネタイズ案",
+    "AIの批判",
+    "AIの着想",
+    "キラー質問",
+    "採択理由",
+    "棄却理由",
+    "店名・品名",
+    "スコア",
+    "リピート",
+    "ジャンル",
+    "メモ",
+    "タイトル",
+    "カテゴリ",
+    "一言感想",
+}
 
-SYSTEM_INSTRUCTION: Final[str] = """You are a strict data extraction agent. From the user message, output JSON only.
+SYSTEM_INSTRUCTION: Final[str] = """You are an index-first structured extraction engine for AI-driven personal development logs.
+Output must be ONE valid JSON object only (no markdown, no comments, no trailing commas).
 
-CRITICAL rules:
-1. No summarization, abstraction, or paraphrasing of facts.
-2. Copy proper nouns, version strings (e.g. Flutter 3.x), numbers, error codes, and file paths exactly as substrings of the input — character-for-character.
-3. Do not modify code inside code blocks; reproduce them exactly (downstream may replace code_snippets with parser output).
-4. Do not infer user intent or background. If something is not stated in the chunk, use null for optional string fields or [] for lists.
+Primary objective:
+- Preserve all reusable technical knowledge for later retrieval in Obsidian/Dataview.
+- Prioritize completeness and referenceability over brevity.
+- Keep concrete facts (proper nouns, numbers, code, steps, technical terms, unique insights) without omission.
+- Minimize null values for learning/source/entry signals when reasonable evidence exists.
 
-Field `context` (string or null):
-- Must be built ONLY from verbatim substrings of the input (concatenate short quotes with newlines if needed).
-- Temperature is 0: still do not paraphrase; if you cannot cite verbatim, use null.
+Hard JSON safety rules (Groq-safe):
+1. Return JSON object only. Do not wrap in code fences.
+2. Use double quotes for all keys/strings. Escape internal quotes/newlines correctly.
+3. Ensure all brackets/braces are closed.
+4. Keep output valid JSON and avoid truncation; if too long, shorten low-value chatter first.
+   Preserve technical details and traceability before compressing.
+5. If unsure, return shorter valid JSON instead of longer invalid JSON.
 
-Structured field policy (must match provided JSON schema):
-- Existing required fields: entities, context, decisions, rejected_ideas, code_snippets.
-- Additional fields:
-  - project: string|null. Candidate values include preflop-trainer-android, chat-log-distiller, talent-rag-bot, recipe-web, ec-sales-automation, vault-admin.
-  - tool_context: string[]. Candidate values include Syncthing, Metadata_Menu, Clibor, Web_Clipper, Dataview, Bases, Python, GAS.
-  - automation_type: string|null. Candidate values include auto_routing, data_sync, sales_tracking.
-  - learning_level: string|null. Allowed mapped values: vibe, understood, mastered.
-  - source_origin: string|null. Allowed mapped values: official_doc, github_issue, ai_hallucination, manual_test.
-  - entry_type: string|null. Allowed values: troubleshooting, idea, research.
+Fact extraction rules:
+1. Prefer exact substrings from input for proper nouns, versions, error codes, file paths.
+2. Do not alter code block content (downstream may replace code_snippets).
+3. Remove greetings/backchannels unless they contain technical value.
+4. Keep the reasoning path (why conclusions were chosen) as structured bullet-ready evidence in `decisions`/`context`.
 
-Signal mapping rules (Japanese cues -> normalized values):
+Field policy (must match schema):
+- Required: entities, context, decisions, rejected_ideas, code_snippets.
+- Optional: project, tool_context, automation_type, learning_level, source_origin, entry_type.
+
+Signal mapping (high recall, evidence-based):
 - learning_level:
-  - vibe <- [なんとなく], [なぜか動いた], [雰囲気]
-  - understood <- [納得], [仕組み理解], [理屈わかった]
-  - mastered <- [完璧], [完全に理解した], [人に教えれる]
+  - vibe <- [なんとなく], [なぜか動いた], [雰囲気], or trial-and-error without clear understanding.
+  - understood <- [納得], [仕組み理解], [理屈わかった], explicit explanation/causal understanding.
+  - mastered <- [完璧], [完全に理解した], [人に教えれる], explicit repeatable/manual-ready confidence.
 - source_origin:
-  - official_doc <- [公式], [リファレンス], [ドキュメント]
-  - github_issue <- [ギットハブ], [issue], [解決策発見]
-  - ai_hallucination <- [AIの嘘], [ハルシ], [嘘つかれた]
-  - manual_test <- [手作業], [泥臭い検証], [実機確認]
-- entry_type guidance:
-  - troubleshooting should be used only when troubleshooting wording is explicit.
-  - idea should be used only when idea/proposal wording is explicit.
-  - research should be used only when investigation/research wording is explicit.
+  - official_doc <- [公式], [リファレンス], [ドキュメント], vendor docs URLs/spec references.
+  - github_issue <- [ギットハブ], [issue], [解決策発見], issue/PR/community fix references.
+  - ai_hallucination <- [AIの嘘], [ハルシ], [嘘つかれた], explicit wrong AI guidance mentions.
+  - manual_test <- [手作業], [泥臭い検証], [実機確認], explicit local/manual verification evidence.
+- entry_type:
+  - troubleshooting: debugging/fix flow with errors or breakage.
+  - idea: design proposal/option planning.
+  - research: comparison/investigation/documentation reading.
 
-Strict anti-inference rule for mapped fields:
-- For learning_level, source_origin, and entry_type, DO NOT guess from tone.
-- If no explicit matching signal exists in the chunk, return null.
-- For project, automation_type, and tool_context, extract only when explicitly stated; otherwise null or [].
+Inline marker support (`〇〇::` style used in notes):
+- Treat explicit `key:: value` lines as high-priority extraction hints when present.
+- Treat ALL following keys as valid structured markers and keep both key and payload as evidence:
+  - Learning / priority:
+    - `理解度:: ...` -> learning_level
+      - includes `1_呪文` / `2_雰囲気` => vibe
+      - includes `3_構造理解` => understood
+      - includes `4_完全理解` => mastered
+    - `重要度:: ...` => strong signal for entities/decisions priority (S/A/B classification).
+  - Troubleshooting / implementation:
+    - `謎ポイント::`, `後で調べる::`, `復習リンク::`, `発生エラー::`, `AIの仮説::`, `解決アクション::`
+    - `没プラン::`, `採用プラン::`, `撤退理由::`
+    - `対象ファイル::`, `対象クラス::`, `対象関数::`, `対象変数::`, `コード断片::`
+  - Idea / business:
+    - `アイデアナゲット::`, `懸念点::`, `検証事項::`, `提供価値::`, `マネタイズ案::`
+    - `AIの批判::`, `AIの着想::`, `キラー質問::`, `採択理由::`, `棄却理由::`
+  - Review templates:
+    - `店名・品名::`, `スコア::`, `リピート::`, `ジャンル::`, `メモ::`
+    - `タイトル::`, `カテゴリ::`, `一言感想::`
+- Mapping guidance from markers:
+  - `発生エラー::` and similar debug traces => entry_type should prefer troubleshooting.
+  - investigation markers (`後で調べる::`, `復習リンク::`, `検証事項::`) => entry_type may be research when dominant.
+  - planning/value markers (`アイデアナゲット::`, `提供価値::`, `マネタイズ案::`) => entry_type may be idea when dominant.
+  - `AIの仮説::` and `AIの批判::` may support source_origin=ai_hallucination when text explicitly indicates wrong AI guidance.
+- Preserve marker payload text in entities/context/decisions/rejected_ideas when useful; do not drop them.
 
-Output must conform to the provided JSON schema."""
+Null-minimization policy for mapped fields:
+- For learning_level, source_origin, entry_type:
+  - Use explicit markers first.
+  - If explicit markers are absent, infer from concrete evidence in the chunk.
+  - Use null only when evidence is truly insufficient.
+- For project/tool_context/automation_type:
+  - extract from explicit names first; weak inference is allowed only when clearly dominant in chunk context.
+
+Context field rule:
+- context must be built from verbatim excerpts from input only.
+- Format `context` as an indexed log with semantic sections where possible:
+  - first lines should include:
+    - `[summary:: ...]`
+    - section blocks using:
+      - `### <specific semantic heading>`
+      - `[context:: ...]`
+      - `[tags:: #keyword1 #keyword2]`
+- Insert section boundaries when topic flow changes.
+- Favor information coverage and traceability over compactness.
+
+Output must strictly conform to the provided JSON schema."""
 
 
 USER_WRAPPER: Final[str] = """## Chat log chunk (verbatim, do not invent content outside it)
@@ -77,7 +161,20 @@ USER_WRAPPER: Final[str] = """## Chat log chunk (verbatim, do not invent content
 {chunk}
 ```
 
-Extract according to the schema. For `context`, use a single string made of verbatim excerpts from the chunk only; if nothing to cite, use null."""
+Extract according to the schema.
+Operational focus:
+- User is an individual builder using AI-led implementation ("vibe coding").
+- Logs are reused later for troubleshooting recall, knowledge/manual writing, and code/script reuse.
+- Optimize for Dataview retrieval quality: prefer concrete entities, decisions, rejected reasons, non-null signal fields, and indexed context blocks.
+- Preserve technical details comprehensively (names, numbers, code fragments, steps, terminology, unique insights).
+- Omit low-value greetings/backchannels unless they carry technical meaning.
+
+For `context`, use one string made of verbatim excerpts only, but structure it as:
+- `[summary:: ...]`
+- `### <specific heading>`
+- `[context:: ...]`
+- `[tags:: #... #...]`
+Repeat sections when the topic changes. If nothing to cite, use null."""
 
 
 def build_user_content(chunk_text: str) -> str:
@@ -96,6 +193,78 @@ def verify_code_snippets_are_substrings(result: ChunkExtraction, chunk: str) -> 
         if sn.code and sn.code not in chunk:
             warnings.append(f"code_snippets[{i}] body not found verbatim in input (len={len(sn.code)})")
     return warnings
+
+
+def _extract_inline_markers(chunk_text: str) -> list[str]:
+    markers: list[str] = []
+    for raw_line in chunk_text.splitlines():
+        m = INLINE_MARKER_RE.match(raw_line)
+        if not m:
+            continue
+        key = m.group("key").strip()
+        if key not in KNOWN_INLINE_KEYS:
+            continue
+        value = m.group("value").strip()
+        if value:
+            markers.append(f"{key}:: {value}")
+        else:
+            markers.append(f"{key}::")
+    return markers
+
+
+def _learning_level_from_inline(markers: list[str]) -> str | None:
+    for m in markers:
+        if not m.startswith("理解度::"):
+            continue
+        if "4_完全理解" in m:
+            return "mastered"
+        if "3_構造理解" in m:
+            return "understood"
+        if "1_呪文" in m or "2_雰囲気" in m:
+            return "vibe"
+    return None
+
+
+def _entry_type_from_inline(markers: list[str]) -> str | None:
+    marker_text = "\n".join(markers)
+    if any(k in marker_text for k in ("発生エラー::", "解決アクション::", "対象ファイル::", "対象関数::")):
+        return "troubleshooting"
+    if any(k in marker_text for k in ("後で調べる::", "復習リンク::", "検証事項::")):
+        return "research"
+    if any(k in marker_text for k in ("アイデアナゲット::", "提供価値::", "マネタイズ案::", "採用プラン::")):
+        return "idea"
+    return None
+
+
+def _augment_with_inline_markers(result: ChunkExtraction, chunk_text: str) -> ChunkExtraction:
+    markers = _extract_inline_markers(chunk_text)
+    if not markers:
+        return result
+
+    decisions = list(result.decisions)
+    for marker in markers:
+        if marker not in decisions:
+            decisions.append(marker)
+
+    context = result.context
+    marker_block = "\n".join(markers)
+    if context:
+        if marker_block not in context:
+            context = context.rstrip() + "\n" + marker_block
+    else:
+        context = marker_block
+
+    learning_level = result.learning_level or _learning_level_from_inline(markers)
+    entry_type = result.entry_type or _entry_type_from_inline(markers)
+
+    return result.model_copy(
+        update={
+            "decisions": decisions,
+            "context": context,
+            "learning_level": learning_level,
+            "entry_type": entry_type,
+        }
+    )
 
 
 def _provider_api_key(provider: str, explicit_api_key: str | None) -> str | None:
@@ -264,7 +433,7 @@ def run_extraction(
             "groq": os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             "mistral": os.environ.get("MISTRAL_BASE_URL", "https://api.mistral.ai/v1"),
         }[provider]
-        return _run_extraction_openai_compatible(
+        result = _run_extraction_openai_compatible(
             provider=provider,
             base_url=base_url,
             api_key=api_key,
@@ -272,6 +441,7 @@ def run_extraction(
             chunk_text=chunk_text,
             max_output_tokens=max_output_tokens,
         )
+        return _augment_with_inline_markers(result, chunk_text)
 
     try:
         from google import genai
@@ -306,7 +476,8 @@ def run_extraction(
     )
     if not response.text:
         raise RuntimeError("Empty model response")
-    return TypeAdapter(ChunkExtraction).validate_json(response.text)
+    result = TypeAdapter(ChunkExtraction).validate_json(response.text)
+    return _augment_with_inline_markers(result, chunk_text)
 
 
 def main(argv: list[str] | None = None) -> int:
