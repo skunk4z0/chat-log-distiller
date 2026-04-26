@@ -5,4 +5,4 @@ python-dotenv>=1.0.0
 markdown-it-py>=3.0.0
 PyYAML>=6.0.0
 tiktoken>=0.7.0
-tiktoken>=0.7.0
+litellm>=1.0.0
