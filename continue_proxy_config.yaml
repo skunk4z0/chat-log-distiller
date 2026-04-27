@@ -1,0 +1,151 @@
+# LiteLLM Proxy Configuration for Continue
+# This file configures LiteLLM to run as a proxy server on port 8000
+# All models are unified under a single model name for Continue compatibility
+
+model_list:
+  # Priority 1: Gemini 2.5 Flash Lite (highest priority)
+  - model_name: "vibe-master-free"
+    provider: "gemini"
+    model: "gemini-2.5-flash-lite"
+    litellm_params:
+      model: "gemini/gemini-2.5-flash-lite"
+      api_key: os.environ["GEMINI_API_KEY"]
+      api_base: os.environ.get("GEMINI_BASE_URL")
+      tpm_limit: 1000000
+      rpm_limit: 15
+    priority: 1
+
+  # Priority 2: Gemini 2.5 Flash
+  - model_name: "vibe-master-free"
+    provider: "gemini"
+    model: "gemini-2.5-flash"
+    litellm_params:
+      model: "gemini/gemini-2.5-flash"
+      api_key: os.environ["GEMINI_API_KEY"]
+      api_base: os.environ.get("GEMINI_BASE_URL")
+      tpm_limit: 1000000
+      rpm_limit: 15
+    priority: 2
+
+  # Priority 3: Gemini 3.1 Flash Lite Preview
+  - model_name: "vibe-master-free"
+    provider: "gemini"
+    model: "gemini-3.1-flash-lite-preview"
+    litellm_params:
+      model: "gemini/gemini-3.1-flash-lite-preview"
+      api_key: os.environ["GEMINI_API_KEY"]
+      api_base: os.environ.get("GEMINI_BASE_URL")
+      tpm_limit: 1000000
+      rpm_limit: 15
+    priority: 3
+
+  # Priority 4: Groq Llama 3.1 8B Instant
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "llama-3.1-8b-instant"
+    litellm_params:
+      model: "groq/llama-3.1-8b-instant"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 6000
+      rpm_limit: 30
+    priority: 4
+
+  # Priority 5: Groq Llama 3.3 70B Versatile
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "llama-3.3-70b-versatile"
+    litellm_params:
+      model: "groq/llama-3.3-70b-versatile"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 6000
+      rpm_limit: 30
+    priority: 5
+
+  # Priority 6: Groq Qwen3 32B
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "qwen/qwen3-32b"
+    litellm_params:
+      model: "groq/qwen/qwen3-32b"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 6000
+      rpm_limit: 30
+    priority: 6
+
+  # Priority 7: Groq Mixtral 8x7B
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "mixtral-8x7b-32768"
+    litellm_params:
+      model: "groq/mixtral-8x7b-32768"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 5000
+      rpm_limit: 30
+    priority: 7
+
+  # Priority 8: Groq Llama 4 Scout 17B
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "meta-llama/llama-4-scout-17b-16e-instruct"
+    litellm_params:
+      model: "groq/meta-llama/llama-4-scout-17b-16e-instruct"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 30000
+      rpm_limit: 30
+    priority: 8
+
+  # Priority 9: Groq GPT-OSS 20B
+  - model_name: "vibe-master-free"
+    provider: "groq"
+    model: "openai/gpt-oss-20b"
+    litellm_params:
+      model: "groq/openai/gpt-oss-20b"
+      api_key: os.environ["GROQ_API_KEY"]
+      api_base: "https://api.groq.com/openai/v1"
+      tpm_limit: 6000
+      rpm_limit: 30
+    priority: 9
+
+  # Priority 10: Mistral Small
+  - model_name: "vibe-master-free"
+    provider: "mistral"
+    model: "mistral-small-latest"
+    litellm_params:
+      model: "mistral/mistral-small-latest"
+      api_key: os.environ["MISTRAL_API_KEY"]
+      api_base: "https://api.mistral.ai/v1"
+      tpm_limit: 50000
+      rpm_limit: 1
+    priority: 10
+
+  # Priority 11: OpenRouter Auto (fallback)
+  - model_name: "vibe-master-free"
+    provider: "openrouter"
+    model: "auto"
+    litellm_params:
+      model: "openrouter/auto"
+      api_key: os.environ["OPENROUTER_API_KEY"]
+      api_base: "https://openrouter.ai/api"
+      tpm_limit: 100000
+      rpm_limit: 20
+    priority: 11
+
+# Router settings
+router_settings:
+  routing_strategy: "priority-based-routing"
+  num_retries: 3
+  timeout: 60
+  allowed_fails: 5
+  retry_on:
+    - "rate_limit_error"
+    - "timeout_error"
+
+# LiteLLM Proxy server settings
+litellm_settings:
+  drop_params: true
+  set_verbose: false
