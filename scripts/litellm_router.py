@@ -43,6 +43,7 @@ def create_model_list(limits_path: str | Path = "api_limits.json") -> list[dict[
             model_config = {
                 "model_name": model_name,
                 "provider": provider,  # Explicit provider key for main.py
+                "model": model_name,  # Explicit model key for main.py
                 "litellm_params": {
                     "model": f"{provider}/{model_name}",
                     "api_key": os.getenv(f"{provider.upper()}_API_KEY"),
