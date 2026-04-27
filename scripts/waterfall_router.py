@@ -4,6 +4,7 @@ This module provides a router that delegates rate limit management to litellm.Ro
 """
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -100,7 +101,60 @@ class TokenTracker:
             "TokenTracker is deprecated. Use WaterfallRouter instead. "
             "Rate limit management is now delegated to litellm.Router."
         )
+        self.limits_file = Path(limits_file)
+        self._limits = self._load_limits()
         self._router = WaterfallRouter(limits_file)
+
+    def _load_limits(self) -> dict:
+        """Load limits from api_limits.json."""
+        if not self.limits_file.exists():
+            logger.warning("api_limits.json not found at %s. Using default high limits.", self.limits_file)
+            return {}
+        with open(self.limits_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _get_limit(self, provider: str, model: str, key: str, default: int) -> int:
+        """Get limit value for a provider/model/key combination.
+
+        Args:
+            provider: Provider name (e.g., 'gemini', 'groq')
+            model: Model name (e.g., 'gemini-2.5-flash-lite')
+            key: Limit key ('rpd', 'rpm', 'tpm')
+            default: Default value if not found
+
+        Returns:
+            Limit value or default
+        """
+        prov_limits = self._limits.get(provider, {})
+        model_limits = prov_limits.get(model, {})
+        if key in model_limits:
+            return model_limits[key]
+        auto_limits = prov_limits.get("auto", {})
+        if isinstance(auto_limits, dict) and key in auto_limits:
+            return auto_limits[key]
+        default_limits = prov_limits.get("default", {})
+        if isinstance(default_limits, dict) and key in default_limits:
+            return default_limits[key]
+        if key in prov_limits and isinstance(prov_limits[key], int):
+            return prov_limits[key]
+        return default
+
+    def get_current_usage(self, provider: str, model: str, now: float) -> tuple[int, int, int]:
+        """Get current usage for a provider/model.
+
+        Since LiteLLM manages rate limits internally, this returns dummy values
+        that indicate the limits are not exhausted.
+
+        Args:
+            provider: Provider name (ignored)
+            model: Model name (ignored)
+            now: Current time (ignored)
+
+        Returns:
+            Tuple of (rpd, rpm, tpm) - all zeros indicating available capacity
+        """
+        # LiteLLM manages usage internally, so we report as available
+        return 0, 0, 0
 
     def estimate_tokens(self, text: str, max_output_tokens: int | None = None) -> int:
         """Estimate token count (approximate).
@@ -123,7 +177,22 @@ class TokenTracker:
         Returns:
             List of model configurations sorted by priority
         """
-        return self._router.get_model_list()
+        configs = []
+        for p_name, models in self._limits.items():
+            if not isinstance(models, dict):
+                continue
+            for m_name, lits in models.items():
+                if not isinstance(lits, dict):
+                    continue
+                prio = lits.get("priority", 999)
+                configs.append(
+                    {
+                        "provider": p_name,
+                        "model": m_name,
+                        "priority": prio,
+                    }
+                )
+        return sorted(configs, key=lambda x: x["priority"])
 
     def can_accept(self, provider: str, model: str, tokens: int, now: float) -> bool:
         """Check if a request can be accepted (always true with LiteLLM).
